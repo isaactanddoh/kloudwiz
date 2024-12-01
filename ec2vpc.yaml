@@ -1,0 +1,204 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  EC2InstanceConnectEndpoint:
+    Type: String
+    Description: The EC2 instance connect endpoint for the current region
+    Default: com.amazonaws.${AWS::Region}.ec2-instance-connect
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/jammy/stable/current/amd64/hvm/ebs-gp2/ami-id
+  InstanceTypeParameter:
+    Description: Enter t3.micro, c5.large, or c5.xlarge. Default is t3.micro.
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - c5.large
+      - c5.xlarge
+  # DBPassword:
+  #   Type: String
+  #   Description: Enter a strong password for the database.
+  #   Default: ""
+  #   # NoEcho: true
+
+Resources:  
+  # Create VPC
+  JomacsVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: JomacsVPC
+        - Key: Purpose
+          Value: Jomacs
+        - Key: Author
+          Value: Isaac
+
+  # Create IGW
+  JomacsIGW:
+    Type: AWS::EC2::InternetGateway
+  
+  # Attach IGW to VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref JomacsVPC
+      InternetGatewayId: !Ref JomacsIGW
+
+  # Create Public Subnet
+  JomacsPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref JomacsVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: JomacsPublicSubnet
+
+  # Create Private Subnet
+  JomacsPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref JomacsVPC
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: JomacsPrivateSubnet
+
+  # Create JomacsPublicSG
+  JomacsPublicSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow ssh and http from anywhere
+      VpcId: !Ref JomacsVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # Create JomacsPrivateSG
+  JomacsPrivateSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow ssh from JomacsPublicSG
+      VpcId: !Ref JomacsVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref JomacsPublicSG
+
+  # Create JomacsPublicRTB
+  JomacsPublicRTB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref JomacsVPC
+
+  # Create Route from Internet to IGW
+  JomacsRTBRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref JomacsPublicRTB
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref JomacsIGW
+
+  # Associate JomacsPublicRTB with JomacsPublicSubnet
+  JomacsPublicRTBAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref JomacsPublicSubnet
+      RouteTableId: !Ref JomacsPublicRTB
+  
+  # Create KeyPair
+  JomacsKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: JomacsKeyPair
+  
+  # Create RDS Instance
+  # JomacsRDSInstance:
+  #   Type: AWS::RDS::DBInstance
+  #   Properties:
+  #     DBInstanceIdentifier: JomacsDBInstance
+  #     Engine: "mysql"
+  #     BackupRetentionPeriod: 0
+  #     DBInstanceClass: db.t3.micro
+  #     AllocatedStorage: 20
+  #     MasterUsername: admin
+  #     MasterUserPassword: !Ref DBPassword
+
+  # Create JomacsBastionHost
+  JomacsWebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceTypeParameter
+      SubnetId: !Ref JomacsPublicSubnet
+      SecurityGroupIds:
+        - !Ref JomacsPublicSG
+      KeyName: JomacsKeyPair
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            sudo apt update -y
+
+            sudo apt install -y nginx
+
+            sudo systemctl start nginx
+            sudo systemctl enable nginx
+
+            sudo apt install -y curl unzip
+
+            cd /var/www/html
+
+            sudo rm index.nginx-debian.html
+
+            sudo curl -o template.zip https://www.tooplate.com/zip-templates/2133_moso_interior.zip
+
+            sudo unzip template.zip -d /var/www/html/
+
+            sudo mv 2133_moso_interior/* .
+            sudo rm -rf template.zip 2133_moso_interior
+
+            sudo chown -R www-data:www-data /var/www/html
+            sudo chmod -R 755 /var/www/html
+
+            sudo systemctl restart nginx
+
+      Tags:
+        - Key: Name
+          Value: JomacsPublicInstance
+
+  # Create Private Intances
+  JomacsPrivateInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      SubnetId: !Ref JomacsPrivateSubnet
+      SecurityGroupIds:
+        - !Ref JomacsPrivateSG
+      KeyName: JomacsKeyPair
+      Tags:
+        - Key: Name
+          Value: JomacsPrivateInstance
+  
+Outputs:
+  PublicInstanceIP:
+    Value: !GetAtt JomacsWebServer.PublicIp
+  
+  DBEndpoint:
+    Value: !GetAtt JomacsRDSInstance.Endpoint.Address
